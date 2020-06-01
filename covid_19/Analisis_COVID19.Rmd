@@ -1,0 +1,1129 @@
+---
+title: "Analisis COVID19"
+author: "Manuel Ruiz Prieto"
+date: "1/7/2020"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+library(knitr)
+library(kableExtra)
+library(tidyverse) # %>%
+library(magrittr)  # %<>%
+library(lubridate)
+library(rnaturalearth)
+# sino tienes instalado rnaturalearth, ejecuta la sentencia: son todos los paquetes necesdarios
+# install.packages(c("cowplot", "googleway", "ggplot2", "ggrepel", "ggspatial", "libwgeom", "sf", "rnaturalearth", "rnaturalearthdata", "rgeos"))
+library(car)
+library(plotly)
+library(xts)
+library(dygraphs)
+
+use_python("C:/Users/mruizprieto/anaconda3/python.exe")
+```
+
+# Carga y limpieza preliminar de los datos
+
+Los datos que se van a analizar en este documento, proceden de la compilaciÃ³n hecha por usuarios de [Kaggle](https://www.kaggle.com/imdevskp/corona-virus-report). La fecha del analisis empieza el 6 de Abril de 2020, utilizando la versiÃ³n nÃºmero 73 recopilada en la web anterior. Este Markdown lo he hido actualizando desde el inicio de la competición (aproximadamente el 4 de abril) hasta el 1 de junio de 2020.
+
+```{python}
+import pandas as pd
+
+datos = pd.read_csv("covid_19_clean_complete.csv")
+datos.head(10)
+```
+
+```{r}
+pd <- import("pandas")
+datos <- pd$read_csv("covid_19_clean_complete.csv")
+kable(head(datos, 10))
+```
+
+```{r}
+datos <- read.csv("covid_19_clean_complete.csv", stringsAsFactors = FALSE)
+datos %>% head(10) %>% kable()
+```
+
+## Estructura de los datos
+
+```{r}
+str(datos)
+colnames(datos) = c("Provincia_Estado",
+                    "Pais_Region",
+                    "Latitud", # N+ o S-
+                    "Longitud", # E+ o W-
+                    "Fecha",
+                    "Casos_Confirmados",
+                    "Casos_Muertos",
+                    "Casos_Recuperados"
+                    )
+datos %>% head() %>% kable() # %>% kable_styling()
+```
+
+* Cualitativas se convierten con `factor` o bien `as.factor`.
+* Ordinales se convierten con `ordered`.
+* Cuantitativos se convierten con `as.numeric`.
+
+```{r}
+datos$Provincia_Estado %<>% factor()
+datos$Pais_Region %<>% factor()
+##datos$Fecha %<>% as.Date(format="%m/%d/%y")
+datos$Fecha %<>% mdy()
+str(datos)
+```
+
+
+$$Confirmados = Muertos + Recuperados + Enfermos$$
+
+```{r}
+datos %<>%
+  mutate(Casos_Enfermos = Casos_Confirmados - Casos_Muertos - Casos_Recuperados)
+
+datos %>%
+  filter(Casos_Confirmados > 10000) %>%
+  head(10) %>%
+  kable()
+
+datos %>% 
+  filter(Casos_Enfermos < 0) %>%
+  arrange(Provincia_Estado, Fecha) %>%
+  kable()
+
+datos %>%
+  filter(Provincia_Estado == "Hainan") %>%
+  kable()
+
+datos %>%
+  filter(Provincia_Estado == "Hainan", Casos_Enfermos < 0) %>%
+  mutate(Casos_Recuperados = Casos_Recuperados + Casos_Enfermos,
+         Casos_Enfermos = 0) %>%
+  kable()
+```
+
+# AnÃ¡lisis geogrÃ¡fico
+
+```{r}
+#datos_europa = datos[datos$Latitud > 38 & datos$Longitud > -25 & datos$Longitud < 30 , ]
+
+datos_europa = datos %>%
+  filter(Latitud > 38, between(Longitud, -25, 30))
+
+nrow(datos_europa)
+
+table(datos_europa$Pais_Region) %>%
+  as.data.frame() %>%
+  filter(Freq > 0) %>%
+  kable()
+
+
+datos_europa %>%
+  filter(Fecha == ymd("2020-03-15")) %>%
+  kable()
+```
+
+$$d(x, y) = \sqrt{(x_{Lat}-y_{Lat})^2 + (x_{Long}-y_{Long})^2}$$
+```{r}
+distancia_grados = function(x, y){
+  sqrt((x[1]-y[1])^2 + (x[2]-y[2])^2)
+}
+
+distancia_grados_potsdam = function(x){
+  potsdam = c(52.366956, 13.906734)
+  distancia_grados(x, potsdam)
+}
+
+dist_potsdam = apply(cbind(datos_europa$Latitud, datos_europa$Longitud),
+                     MARGIN = 1, 
+                     FUN = distancia_grados_potsdam)
+
+datos_europa %<>%
+  mutate(dist_potsdam = dist_potsdam)
+
+datos_europa %>%
+  filter(between(Fecha, dmy("2-3-2020"), dmy("7-3-2020")),
+         dist_potsdam < 4) %>%
+  kable()
+```
+
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+datos$Pais_Region = factor(datos$Pais_Region, levels = c(levels(datos$Pais_Region), "United States"))
+
+datos[datos$Pais_Region=="US",]$Pais_Region = "United States"
+
+world %>%
+  inner_join(datos, by = c("name" = "Pais_Region")) %>%
+  filter(Fecha == dmy("30-03-2020")) %>%
+  ggplot() +
+  geom_sf(color = "green", aes(fill = Casos_Confirmados)) +
+  coord_sf(crs="+proj=laea +lat_0=75 +lon_0=8 +units=m +ellps=GRS80") +
+  scale_fill_viridis_c(option="plasma", trans = "sqrt") +
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo ", subtitle = "COVID 19") 
+
+```
+```{r}
+
+world %>%
+  inner_join(datos, by = c("name" = "Pais_Region")) %>%
+  filter(Fecha == dmy("30-03-2020")) %>%
+  ggplot() +
+  geom_sf(color = "green", aes(fill = Casos_Confirmados)) +
+  coord_sf(crs="+proj=laea +lat_0=75 +lon_0=8 +units=m +ellps=GRS80") +
+  scale_fill_viridis_c(option="plasma", trans = "sqrt") +
+  xlab("Longitud") + ylab("Latitud") +
+  ggtitle("Mapa del mundo ", subtitle = "COVID 19") 
+```
+
+
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+class(world)
+
+ggplot(data = world) + 
+    geom_sf(color = "black", fill = "lightgreen")
+
+ggplot(data = world) +
+    geom_sf(aes(fill = pop_est)) +
+    scale_fill_viridis_c(option = "plasma", trans = "sqrt")
+
+ggplot(data = world) +
+    geom_sf() +
+    coord_sf(crs = "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m +no_defs ")
+```
+Vamos a pintar un mapa minimalista de puntos para un día. Se ve la forma la los continentes debido a estos paises estan muy contagiados, 
+```{r}
+library("ggplot2")
+datos %>%
+  filter(Fecha == dmy("30-03-2020")) %>%
+  ggplot(aes(Longitud, Latitud)) +
+  geom_point(aes(size = log(Casos_Confirmados+1), colour = log(Casos_Muertos+1))) +     # log(Casos_Muertos+1) el +1 es para ecitar los caos igual a cero. No deberia                                                                                            haber ninguno, pero nos aseguramos. Se puede eliminar las escalas logaritmicas.
+  coord_fixed() +                                                                    # esta capa es para estirar el mappa y sea más acorde al habitual
+  theme(legend.position = "bottom") 
+```
+Vamos a analizar el número de muertos. Un ratio de muertos por paises para ver cual de ellos es más alta. Vamos a filtrar por una fecha determinada para analizar los paises. Para ello, vamos a realizar un ratio de muertes. Los no infectados se eliminan del gráfico (estos paises pueden ser porque el virus no ha llegado o no se han registrado según elñ dataseck) 
+
+China no aparece a partir de cierta fecha, igual que Alemania. ¿Son muy punteros para eliminar el virus? o ¿No dan información real? ¿miden métricas diferentes? ¿estan más controladas las infecciones? 
+
+```{r}
+
+thr = 1000   # Número minimo de casos confirmados
+
+datos %>%
+  filter(Fecha == ymd("2020-04-20"),
+         Casos_Confirmados > thr) %>%
+  mutate(Prop_Muertos = Casos_Muertos / Casos_Confirmados, #mutate es para añadir columnas al data frame, pero no se muestran en él, es solo para represenmtar.
+         Ranking = dense_rank(desc(Prop_Muertos))) %>%
+  arrange(Ranking) %>%
+  head(20) %>%
+  kable()
+```
+Vamos a ver el factor tiempo del datasets para estudiar si aparecen estos paises como china o Alemania. 
+
+Realizamos un número de cortes para longitud y latitud en un número de elementos. podemos Usaamos la regla de sturger para longitud y de stott para latitud, o bien, hacer diviciones iguales cada tantos pasos. Aquí usaremos esta ultima para longitud y latitud, y que cambien cada 10. La segmentaciónm puede ir de 1 en 1, o algo máenos precisa.   
+
+Hay zonas que tienen más observaciones que otras. Esto no es número de casos, sino para visualizar donde hay más datos. Para ello, creamos un diagrama de mosaicos. 
+
+Hay más secciones en vertical que en horizontal. Esto es un mapa del mundo donde america aparece a la izquierda, centro ueropa, y china a la derecha. Los cuadrados son proporcinales a las observaciones. Por ejemplo, Canada esta muy vacia de datos. Europa se aprecia que tiene mucha mayor cantidad respecto a Africa porque tienen ausencia de información.
+
+
+
+```{r}
+datos$lat_class = cut(datos$Latitud, 
+                      breaks = seq(from = -90, to = 90, by = 10))
+datos$long_class = cut(datos$Longitud, 
+                       breaks = seq(from = -180, to = 180, by = 10))
+tt = table(datos$lat_class, datos$long_class)  # tabla de datos que se recoge cuantas obrservaciones caen en esas latitud y longitud.
+tt = tt[nrow(tt):1, ]                          # cambioar orden de las filas, para visaulizar norte y sur facilmment (previene que sea invertido). 
+mosaicplot(t(tt), shade = TRUE)
+```
+
+
+## Análisis de datos temporal
+
+Hasta ahora no hemos analizado datos de evolución temporal. Ahora, vamos a representar los datos acumulados para las fechas para todas las regfiones. Después filtraremos para España para visualizar esos datos.Vamos a realizar tres graficos:
+
+1- Pintaremos los caos confirmados, que son los datos acumulados sque son la suma de los datos de muertos, confirmados y recuperados para cada día. Podemos visualizar los casos confirmados por fecha para el grafico mediante la función barplot.Después, veremos el ejercicio de apilar los tres casos en un mismo gráfico (ver chunk de abajo).
+2- No obstante, me parece mejor usar un plot de los casos confirmados de la fecha y distinguiendo los tres casos. Se observa que la forma de subida es similar (no el orden de magnitud) para los muertos y confirmados tiene una forma similar salvo desplazada la curva 7 días. El patrón indica que parece bien tomado porque las tendencia se mantienen.   
+
+3- El tercer gráfico y más vistoso es realizar un dygraph para hacerlo más interactivo con la libreria xts. 
+```{r}
+datos_por_fecha = aggregate(
+  cbind(Casos_Confirmados, Casos_Muertos, Casos_Recuperados) ~ Fecha,
+  data = datos, 
+  FUN = sum
+)
+datos_por_fecha$Casos_Enfermos = datos_por_fecha$Casos_Confirmados - datos_por_fecha$Casos_Muertos - datos_por_fecha$Casos_Recuperados
+head(datos_por_fecha)
+tail(datos_por_fecha)
+
+barplot(Casos_Confirmados ~ Fecha, data = datos_por_fecha)
+
+plot(Casos_Confirmados ~ Fecha, data = datos_por_fecha, col = "blue", type = "l", main = "Casos documentados por día en todo el mundo", xlab = "Fecha", ylab = "Número de personas", log = "y")
+lines(Casos_Muertos ~ Fecha, data = datos_por_fecha, col = "red")
+lines(Casos_Recuperados ~ Fecha, data = datos_por_fecha, col = "green")
+
+legend("topleft", c("Confirmados", "Muertos", "Recuperados"), 
+       col = c("blue", "red", "green"), pch = 1, lwd = 2)
+
+datos_por_fecha_ts <- xts(x = datos_por_fecha[, 2:5],
+                          order.by = datos_por_fecha$Fecha)
+
+#Plot interactivo
+# dyOptions: diferentes opciones para el gráfico. Por ejemplo: labelsUTC:formato utc,labelsKMB: para etiquetas de mile, fillGraph: relleno gráfica, fillAlpha = grosor relleno, drawGrid: eliminar grid, colors = color de la grafica. Por ejemplo colors = "#D9AE55"
+dygraph(datos_por_fecha_ts) %>%
+  dyOptions(labelsUTC = TRUE, labelsKMB = TRUE,
+            fillGraph = TRUE, fillAlpha = 0.1, 
+            drawGrid = FALSE) %>%
+  dyRangeSelector() %>%
+  dyCrosshair(direction = "vertical") %>%
+  dyHighlight(highlightCircleSize = 5, highlightSeriesBackgroundAlpha = 0.2,
+              hideOnMouseOut = FALSE) %>%
+  dyRoller(rollPeriod = 2)
+
+```
+
+Para las gráficas 1 y 2, se puede mejorar el código usando ggplot. No obstante, hace falta un tratamiento previo de los datos como se puede apreciar en el documento. Vamos a filtar el dato por España y partícularizar por mi país natal. Todos los datos estan centrados en misma latitud, que estoda España. No podemos separar por número de personas fila a fila con este tipo de datasets.
+
+En vez de filtrar, vamos a seleccionar algunas variables del dattasect (es función de tidyverse). Vamos a seleccionar todos los casos de España.
+El gráfico de escalones nos indica que el orden del cambio procede de manifestaciones al rededor del 8 de marzo, partídos de futbol, concierto, barbacoas por hacer buen comenzar el buen tiempo, etc. 
+```{r}
+datos_spain = datos %>% 
+  filter(Pais_Region == "Spain") %>%
+  select(Fecha, starts_with("Casos_"))
+# Gráfico simple por escalones (type = "s").
+plot(x = datos_spain$Fecha, y = datos_spain$Casos_Confirmados,
+     main = "Casos confirmados en España", type = "s",        
+     col = "blue", lwd = 2)
+
+datos_por_fecha_ts <- xts(x = datos_spain[, 2:5],
+                          order.by = datos_spain$Fecha)
+dygraph(datos_por_fecha_ts) %>%
+  dyOptions(labelsUTC = TRUE, labelsKMB = TRUE,
+            fillGraph = TRUE, fillAlpha = 0.05, 
+            drawGrid = FALSE, colors = "#D9AE55") %>%
+  dyRangeSelector() %>%
+  dyCrosshair(direction = "vertical") %>%
+  dyHighlight(highlightCircleSize = 5, highlightSeriesBackgroundAlpha = 0.2,
+              hideOnMouseOut = FALSE) %>%
+  dyRoller(rollPeriod = 2)
+
+barplot(as.matrix(t(datos_spain[, 3:5])),
+        names = datos_spain$Fecha, 
+        col = c("red", "green", "yellow"),
+        main = "Estudio de casos por tipo en España", 
+        xlab ="Fecha", ylab = "Número de personas")
+legend("topleft", c("Muertos", "Recuperados", "Enfermos"),
+       col = c("red", "green", "yellow"), lwd = 2, pch = 1
+       )
+```
+Vamos a ver un tipo de análisis de datos de series temporales donde podemos comparar los datos con el día anterior (en vez de agrupados, se ve lña evolución diaía), podemos mostrarlo mediante un tratamiento de datos. Podemos adelantar un día por medio de lag (lead para retrasarlos). Con la función lag podemos definir datos del dia anterior. De esta forma podemos restarlo con los del día actual y mostrar datos diarios (se pude hacer lo mismo con lead que seria el del día futuro, menos el caso actual). La muestra n = 1 es para com`parar con el día siguiente (si vale 7 sería comparar con la semana siguiente).
+
+DeDe esta forma se puede ver los picos donde será máximo el confinamiento y menor. El pico es negativo alrededor del dia 22 de septiembre. Si análizamos el datasets, los casos confirmados pasan de ser 208389, a 213024, para volver a 202990. Esto parece indicar que se registro de forma erronea los datos para ese día, ya que después vuelven a su cauce original. Se observa que después del máximo pico del día 2020-03-24, el número de casos nuevos decrece con el tiempo hasta registrar pocos casos a finales de abril. Esto indica que el máximo de infectados ya ha pasado y las medidas de confinamiento contenieron la expansión del virus. 
+
+```{r}
+datos_spain %<>%
+  mutate(Nuevos_Casos_Confirmados = Casos_Confirmados - lag(Casos_Confirmados, n = 1),
+         Nuevos_Casos_Muertos = Casos_Muertos - lag(Casos_Muertos, n = 1),
+         Nuevos_Casos_Recuperados = Casos_Recuperados - lag(Casos_Recuperados, n = 1)
+         )
+
+plot(Nuevos_Casos_Confirmados ~ Fecha, data = datos_spain,
+     type = "l", col ="blue", 
+     xlab = "Fecha", ylab = "Nuevos casos", 
+     main = "Nuevos registros en España")
+lines(Nuevos_Casos_Muertos ~ Fecha, data = datos_spain,
+      type = "l", col = "red")
+lines(Nuevos_Casos_Recuperados ~ Fecha, data = datos_spain,
+      type = "l", col = "green")
+
+legend("topleft", c("Confirmados", "Muertos", "Recuperados"), 
+       col = c("blue", "red", "green"), 
+       lwd = 2, pch = 1)
+
+# Como se hace similar para la función lead en vez de lag.
+#datos_spain2 = datos %>% 
+#  filter(Pais_Region == "Spain") %>%
+#  select(Fecha, starts_with("Casos_"))
+
+#datos_spain2 %<>%
+#  mutate(Nuevos_Casos_Confirmados = lead(Casos_Confirmados, n=1) - Casos_Confirmados,
+#         Nuevos_Casos_Muertos = lead(Casos_Muertos, n = 1) - Casos_Muertos,
+#         Nuevos_Casos_Recuperados = lead(Casos_Recuperados, n= 1) - Casos_Recuperados
+#         )
+
+#plot(Nuevos_Casos_Confirmados ~ Fecha, data = datos_spain2,
+#     type = "l", col ="blue", 
+#     xlab = "Fecha", ylab = "Nuevos casos", 
+#     main = "Nuevos registros en España")
+#lines(Nuevos_Casos_Muertos ~ Fecha, data = datos_spain2,
+#      type = "l", col = "red")
+#lines(Nuevos_Casos_Recuperados ~ Fecha, data = datos_spain2,
+#      type = "l", col = "green")
+
+#legend("topleft", c("Confirmados", "Muertos", "Recuperados"), 
+#       col = c("blue", "red", "green"), 
+#       lwd = 2, pch = 1)
+```
+
+## Analisis por Cohortes
+
+El contagio es diferente a cada pais porque en cada uno de ellos se origina la pandemiaotro día. Para eso se utilizan unas herramientas del mundo del negocio, los denominados cohortes. Podemos segmentar por cohortes según perfil social, procedencia, etc. Aquí vamos a realizar un país por cohorte donde restaremos fecha origen de la pandemia a la original. El día cero será el día donde originan la pandemia. Y el día uno será cuando tengamos su primer dia infectado.
+
+Para ello, usamos un groupby para agruparlo por región y filtramos por casos confirmados. Después mediante summarise realizamos una transformación de datos para tener fecha de primer contagio. 
+
+Por ejemplo, para España el día D es el dos de febrero. primer_contagio será un data frame con las fechas de primer contagio para cada país del datasets original. Después, data_first será el datasets para mostrar datos de cada país escalada para el primer contagio. El gran problema de los cohortes es la cantidad de cohortes que hay, la leyenda va a ser enorme. Podemos eliminar la leyenda enmn primera aproximación. La otra es activar un filtro de los paises más representativos.
+
+Podemos ver que primero era china. Después crecio España, pero le remonto Italia al poco tiempo. En  mexico llevan 7 días de atraSO. Belgica, Corea del sur, Vietnam, .... parece que han controlado el virus y no ha crecido de forma exponencial, como por ejemplo, Estados Unidos. 
+
+```{r}
+primer_contagio = datos %>%
+  group_by(Pais_Region) %>%
+  filter(Casos_Confirmados > 0) %>%
+  summarise(Primer_Contagio = min(Fecha)-1)
+
+
+data_first = datos %>%
+  inner_join(primer_contagio, by = "Pais_Region") %>%                           # esta mano solo tiene un by porque ambas columnas se llaman igual.
+  mutate(Dias_Desde_PC = as.numeric(Fecha - Primer_Contagio)) %>%              # pasamos la fecha a tipo númerico para poderlo pintar facilmente
+  filter(Dias_Desde_PC >= 0) %>%                                               # no tiene sentido analizar por cohortes las fechas negativas antes del primer contagio
+  group_by(Dias_Desde_PC, Pais_Region) %>%                                      # agrupamos por dias del primer contacto y por región
+  summarise(Casos_Confirmados = sum(Casos_Confirmados),                  # metricas a calcular: casos confirmados, casos muertos, casos recuperados y casos enfermos
+            Casos_Muertos = sum(Casos_Muertos),
+            Casos_Recuperados = sum(Casos_Recuperados),
+            Casos_Enfermos = sum(Casos_Enfermos))
+
+
+data_first %>%
+  #filter(Pais_Region %in% c("Spain", "Italy", "China", "United States", "Germany")) %>%
+  ggplot(aes(x = Dias_Desde_PC, y = Casos_Confirmados)) +
+  geom_line(aes(col = Pais_Region)) +            # cada país y región tiene otro país.
+  xlab("Días desde el primer contagio") +
+  ylab("Número de personas contagiadas") + 
+  ggtitle("Analisis por Cohortes") +
+  theme(legend.position = "none") 
+```
+```{r}
+data_first %>%
+  filter(Pais_Region %in% c("Spain", "Italy", "China", "United States", "Germany")) %>%
+  ggplot(aes(x = Dias_Desde_PC, y = Casos_Confirmados)) +
+  geom_line(aes(col = Pais_Region)) +            # cada país y región tiene otro país.
+  xlab("Días desde el primer contagio") +
+  ylab("Número de personas contagiadas") + 
+  ggtitle("Analisis por Cohortes de los paises: España, italia, alemania, china y EEUU")
+```
+
+```{r}
+data_first %>%
+  filter(Pais_Region %in% c("Spain", "Italy", "China", "United States", "Germany")) %>%
+  ggplot(aes(x = Dias_Desde_PC, y = Casos_Enfermos)) +
+  geom_line(aes(col = Pais_Region)) +            # cada país y región tiene otro país.
+  xlab("Días desde el primer contagio") +
+  ylab("Número de personas contagiadas") + 
+  ggtitle("Analisis por Cohortes de los paises: España, italia, alemania, china y EEUU")
+```
+
+
+
+## Modelos de regresión simple
+
+Vamos a realizar algún modelo para calcular el resultado de la pandemia. Este vendra bien para la primera cresta. 
+
+* $x$: Variable Independiente: nÃºmero de días desde el origen de la pandemia. Debe ser una variable independiente.
+* $y$: Variable Dependiente: número de casos confirmados. 
+
+$$y = f(x)$$
+A la fecha actual, le vamos a restar la fecha del origen de la pandemia para colocar como origen. 
+```{r}
+datos_spain$Dias = as.numeric(datos_spain$Fecha - dmy("22/01/2020"))
+```
+
+### Regresión Lineal
+
+$$y = ax+b, a,b\in \mathbb R$$
+
+$$min_{a,b\in\mathbb R} \sum_{i=1}^n (y_i-(ax_i+b))^2$$
+
+```{r}
+mod1 <- lm(Casos_Confirmados ~ Dias, data = datos_spain)
+summary(mod1)
+```
+Este modelo explica el 77 % de los datos de casos confirmados (que son acumulados) y tiene un p valor muy pequeño. No esta nada mal para ser el módelo más sencillo. 
+
+$$Casos\ Confirmados = `r mod1$coefficients[2]` Dias + `r mod1$coefficients[1]`$$
+
+Vamos a representar el modelo en un gráfico para ver su evolución. 
+
+Vamos a pintar tres gráficos: 
+
+1- El primero muestra los datos originales que tenemos con la recta de regresión de encima (pintado en naranja). Esta recta es la que minimiza los rmse. Las diferencia entre el valor real y su preducción sería más grande. Se ve que es un modelo simple, pero como resultado es un desastre proque no reproduce el comienzo y el final. El modelo parece describe bien la pendiente de subida, pero lo realiza de forma abrupta y continua. Y previene ser un modelo sigmoide. Parece que los datos iniciales como los finales no los muestra bien. POr ejemplo, para los finales sobre evalua los casos confirmados.  
+
+2- Sin embargo, el gráfico que muestra los recidios vs  valores ajustados (o prediucción) Vemos que cuando la predicción es buena, no deberia de haber un patrón diferenciado. Aqí aparece un patrón de linea recta antes y parabola despues. Esto da origen a muy mala predicción. No es real. Lo ideal es que sea aleatorio. También deberia de haber la misma varianza. con __residuos = mod1$residuals__ podemos ver los residuos. Normalmente, los residuos deberian de pasar un test de chi2, the whay, ... que son para pasar datos normales. Para eso, realizamos la tercera gráfica. 
+
+3 - Contractar si residuos contribuyen a una relación normal. Para eso, usamos la libreria __cars__ con la función __qqplot__. Se parece que no hay distribución normal puesto que los datos se desvian de los datos con interfavlo de confianza. Donde se comete más errores es al principio, y a partir de los datos de enmedio en adelante (los puntos negros salen del intervalo)
+
+A pesar de que el modelo ten´´ia un R2 aceptable, el modelo deberia ser descartado porque no existe distribución normla en los residuos. 
+
+
+```{r}
+plot(datos_spain$Dias, datos_spain$Casos_Confirmados)
+abline(mod1, col = "orange")
+
+plot(mod1$residuals~mod1$fitted.values, xlab = "Valores Ajustados", ylab = "Residuos del modelo")
+
+residuos = mod1$residuals
+
+qqPlot(residuos, distribution = "norm", 
+       mean = mean(residuos), sd = sd(residuos))
+```
+
+### Regresión exponencial
+
+Podemos aplicar un modelo exponencial para intentar corregir este resultado. Es similar al anterior pero se aplica la línmea recta sobre el logaritmo de los caos confirmados. Como los datos de valor cero no existen, se debe filtrar para eliminar los datos que son cero (son los iniciales)
+
+$$log(y) = ax+b, a,b \in \mathbb R$$
+$$y = e^{ax+b} = m e^{ax}$$
+
+
+```{r}
+mod2 <- lm(log(Casos_Confirmados) ~ Dias, data = datos_spain[datos_spain$Casos_Confirmados>0, ])
+summary(mod2)
+```
+Ahora el modelo se aproxima a 0.8842. Hasta abril se obtenioa uno de 0.9473.. Pero a medida que se añade más filas al dasatest, el modelo se reajusta (es lo que pasa descargar y actualizar lod datos del datasets). Claro el modelo falla porque el crecimiento era cada vez más rápido, pero con datos hasta mayo es normal, los casos se van ajustando a un plateau.
+
+
+
+
+$$Casos\ Confirmados = `r exp(mod2$coefficients[1])` \cdot e^{`r mod2$coefficients[2]`\cdot x}$$
+Si hacemos un analisis de residuos y ver si existe una distribución normal. La desviación estandar cae más de los intervalos de confianza. Pero el modelo cae pesimista a caer en infinito y no consigue ver los modelos de contención. Antes del 1 de abril, el modelo si seguia una exponencial pero estas medidas hacen que se normalicen. Sin meabrgo, aún existe una tendencia de los residuos y no es caótica (al principio y final tienen un comportamiento nada aleatorio)
+
+
+```{r}
+plot(datos_spain$Dias, datos_spain$Casos_Confirmados)
+lines(exp(mod2$coefficients[1])*exp(mod2$coefficients[2]*datos_spain$Dias), col = "green")
+
+plot(mod2$residuals ~ mod2$fitted.values, xlab = "Valores Ajustados", ylab = "Residuos del modelo")
+residuos = mod2$residuals
+qqPlot(residuos, distribution = "norm", 
+       mean = mean(residuos), sd = sd(residuos))
+```
+
+### Modelo potencial
+
+Con este modelo, intentaremos coger estos valores que no recogemos en los casos anteriores. Este  modelo es similar al exponencial pero estimamos el logatirmo de la vaiable indepediente con el modelo variable independiente. De nuevo debemos de filtrar para caos mayores de cero.
+
+$$log(y) = a\cdot log(x)+b, a,b\in \mathbb R$$
+$$y = e^{a\cdot log(x)+b} = e^b\cdot e^{log(x)^a} = m\cdot x^a$$
+
+```{r}
+mod3 <- lm(log(Casos_Confirmados) ~ log(Dias),
+           data = datos_spain[datos_spain$Casos_Confirmados > 0, ])
+summary(mod3)
+```
+Ahora el r2 se mejora en varias decimales entrando aen los 0.9021 hasta el 8 de mayo. El modelo peque de una urva plana al principio por no haber en los datos. Con el qqplot, nos indican que el modelo peca de mantenerse en distribución normal debido a los datos pesimistas. 
+
+
+$$Casos\ Confirmados = `r exp(mod3$coefficients[1])`\cdot Dias^{`r mod2$coefficients[2]`}$$
+
+```{r}
+plot(datos_spain$Dias, datos_spain$Casos_Confirmados)
+lines(exp(mod3$coefficients[1])*datos_spain$Dias^mod3$coefficients[2], col = "purple")
+
+plot(mod3$residuals~mod3$fitted.values, 
+     xlab = "Valores Ajustados", ylab = "Residuos del modelo")
+residuos = mod3$residuals
+qqPlot(residuos, distribution = "norm", mean = mean(residuos), sd = sd(residuos))
+```
+Podemos mejorar el modelo con una regresión multiple, para ver si podemos combianr un mejor modelo combinando variables. 
+
+# Modelo regresión multiple
+
+```{r}
+mi_model <- lm(log(Casos_Confirmados) ~ Dias + log(Dias) + I(Dias^2) + I(Dias^3) + sqrt(Dias),
+               data = datos_spain[datos_spain$Casos_Confirmados> 0, ] )
+summary(mi_model)
+```
+
+Ahora el R2 es de 0.9951, que se ajusta muchisimo mejor. EL R2 ajustado penaliza al añadir variables al modelo ya que este siempre aumenta mientras se añaden más variables.
+
+## Conclusiones de modelos
+
+Vamos a ver como se ajustan nuestros modelos. Para ello, vamos a generar una simulación con modelos y ver si llegarón a predecirlo. 
+
+Para comparar los datos reales debemos de eliminar aquellos valores nulos de entrada para que tengan la misma longitud (el valor primero es nulo para las columnas generadas de casos confirmados). Para eso, podemos hacer dos cosas:
+  1- Filttrar el datasets eliminando el valor nulo. Para ello creamos otro con el nombre spain.  
+  Código: __spain <- datos_spain[!is.na(datos_spain$Nuevos_Casos_Confirmados),]__
+  Este es el caso del código.
+  2- No manipular el datasets, sino eliminar los valores nulos en la representación. Se eliminaría la fila 577 y se añade en la representación el siguiente código:
+  __datos_por_fecha_ts = xts(x = data.frame(Real = c(datos_spain$Casos_Confirmados, rep(NA,length(pred1)- length(datos_spain$Casos_Confirmados))),__
+                                        __Mod_Lin = pred1,__
+                                        __#Mod_Exp = pred2,__ 
+                                        __Mod_Pot = pred3,__ 
+                                        __Mod_Mixt = pred4),__
+                         __order.by = dates)__
+                         
+Notas: En ambos casos, he comentado la exponencial puesto que el modelo cre ce tanto que no permite observar el resto. Aunque como es gráfico interactivo, se puede hacer un zoom posteriormente.
+```{r}
+start_date = ymd('2020-01-22')
+end_date = ymd('2020-05-25')
+
+dates = seq(start_date+1, end_date, by = "1 day")
+days_since_start = as.numeric(dates - start_date)
+new_data = data.frame(Dias = days_since_start)
+
+pred1 = predict(mod1, newdata = new_data)
+pred2 = exp(predict(mod2, newdata = new_data))
+pred3 = exp(predict(mod3, newdata = new_data))
+pred4 = exp(predict(mi_model, newdata = new_data))
+
+spain <- datos_spain[!is.na(datos_spain$Nuevos_Casos_Confirmados),]  # 
+
+datos_por_fecha_ts = xts(x = data.frame(
+                                        Real = spain$Casos_Confirmados,
+                                        Mod_Lin = pred1,
+                                        #Mod_Exp = pred2, 
+                                        Mod_Pot = pred3, 
+                                        Mod_Mixt = pred4),
+                         order.by = dates)
+
+
+dygraph(datos_por_fecha_ts)
+```
+ 
+El modelo que más se aproxima a los datos es el mixro hasta el 10 de mayo. Lo unico que los datos bajan para cierto valor (A partir del 17 de apbil, desciende la gráfica mientras que la real no lo hace). Cosa que no ocurre en los casos reales, que son de tipo acumulados,, y por lo tanto, no pueden decrecer. 
+Al principio, el modelo parecía exponencial pero menos mal que el estado decreto el confinamiento para evitar este crecimiento exponencial. Curiosamente, el modelo lineal llega a ser igual para mediados de Mayo, que ya estamos en una fase más estable. 
+
+¿Cuale es el mejor modelo? pues ninguno. Pero la idea de los modelos debe de ser estudiar los casos más que intentar reproducirlos fielmente. Luego, realizaremos un forecast para predecir los casos futuros mediante una red ARIMA.
+
+## Test chi cuadrado
+
+Vamos a realizar un estudio sobre la bondad de ajustes los datos 
+Anteriormente, hemos tratado a los paises sin contar su población. Este motivo hace que estados unidos lideré la curva. La población allí es superior a España.
+
+Vamos a ver un paquete que te permite extraer la población por paises (wb de wbstats). Podemos ver la población de paises durante el 2018 ya que el 2019 no está aún públñicado.
+```{r}
+library(wbstats)
+pop_data <- wb(indicator = "SP.POP.TOTL", startdate = 2018, enddate = 2019)
+pop_data
+
+```
+Eliminamos los paises que no dispongan de datos en nuestro dataseets.
+```{r}
+# Leer de nuevo el datasets y eliminar los paises con datos nulos.
+#covid19 <- datos
+#covid19 <- read_csv("covid_19_clean_complete.csv")
+#covid19.netejat <- covid19[!is.na(covid19$`Country/Region`),]
+#covid19.netejat <- na.omit(covid19)
+
+covid19=read.csv("covid_19_clean_complete.csv")
+#covid19$Country.Region
+
+paises=unique(covid19$Country.Region)
+covid19.netejat =c()
+for (i in 1:length(paises)){
+  if(length(which(paises[i] %in% pop_data$country))>0){
+    covid19.netejat = rbind(covid19.netejat,covid19[covid19$Country.Region==paises[i],])
+  }
+}
+```
+
+Podemos visaulizarun gráfico de infectados, fallecido y recuperados. Al principio hubo un repunte el 3 de marzo. Por eso la medida de confianmiento. 
+
+```{r}
+c = covid19.netejat
+c$Date=as.Date(as.character(c $Date), "%m/%d/%Y")
+infectados.totales.por.dia = aggregate(c$Confirmed ~ c$Date,FUN=sum)
+fallecidos.totales.por.dia = aggregate(c$Deaths ~ c$Date,FUN=sum)
+recuperados.totales.por.dia = aggregate(c$Recovered ~ c$Date,FUN=sum)
+tabla.totales = data.frame(infectados.totales.por.dia[,1], infectados.totales.por.dia[,2],
+                           fallecidos.totales.por.dia[,2], recuperados.totales.por.dia[,2])
+names(tabla.totales) = c("Fecha", "Infectados", "Fallecidos", "Recuperados")
+
+ggplot(tabla.totales, aes(tabla.totales$Fecha)) + 
+  geom_line(aes(y=tabla.totales$Infectados, colour = "Infectados")) +
+  geom_line(aes(y=tabla.totales$Fallecidos, colour = "Falleecidos")) +
+  geom_line(aes(y=tabla.totales$Recuperados, colour = "Recuperados")) +
+  xlab("Fecha") + ylab("Frecuencias") +
+  scale_color_manual(values=c("red", "yellow", "green"))
+```
+Visto esto, vamos a calcular el test de chi cuadrado. Para ello, debemos de fijar una fecha. Por ejemplo, el 5 de mayo del 2020. Debemos de añadir el número de casos confirmados a nuestro datasets
+__covid19.netejat__. (usamos la misma metodología con la función aggregate)
+
+A su vez, calculamos el número de expuestos N y el numero de infectados.
+```{r}
+
+fecha="5/7/20"
+confirmados.por.pais = aggregate(covid19.netejat$Confirmed[covid19.netejat$Date==fecha] ~ covid19.netejat$Country.Region[covid19.netejat$Date==fecha],
+                                 FUN=sum)
+names(confirmados.por.pais)=c("Pais","Confirmados")
+
+paises=unique(covid19.netejat$Country.Region)   # paises que tenemos datos
+suma.total.habitantes=sum(pop_data[pop_data$country %in% paises,]$value)    # N será todos los datos de la tabla de cada país
+infectados.totales = sum(covid19.netejat[covid19.netejat$Date==fecha,]$Confirmed)
+```
+Para calcular frecuencias esperadas para cada país, creamos una tabla tabla.infectados.paises. Esta tabla contendrá el país, los infectados reales y los infectados estimados 
+```{r}
+tabla.infectados.paises =c()
+
+for (i in 1:length(paises)){
+    habitantes=pop_data[pop_data$country==paises[i],]$value  # habitantes país en cuestión.
+    confirmados = confirmados.por.pais$Confirmados[confirmados.por.pais$Pais==paises[i]]
+    confirmados.estimados = infectados.totales*habitantes/suma.total.habitantes
+    tabla.infectados.paises=rbind(tabla.infectados.paises,c(confirmados,confirmados.estimados))
+}
+tabla.infectados.paises=as.data.frame(tabla.infectados.paises)   #tranformamos a un DF
+tabla.infectados.paises = data.frame(paises,tabla.infectados.paises) # añadimos paises con datos
+names(tabla.infectados.paises)=c("pais","infectados","infectados.estimados") # cambio de cabeceras
+```
+
+Ahora vendría realizar el test de chi cuadrado con la frecuencia:
+__chisq.test(as.numeric(as.character(tabla.infectados.paises$infectados)),p=as.numeric(as.character(tabla.infectados.paises$infectados.estimados)))__
+
+Sin embargo nos produce un error salvo que tratemos la frecuencia de países menos frecuentes, los juntareemos en uno solo y sumaremos todas sus frecuencias.
+
+```{r}
+
+tabla.infectados.paises$infectados.estimados=tabla.infectados.paises$infectados.estimados/
+  sum(tabla.infectados.paises$infectados)
+
+paises.con.problemas = which(tabla.infectados.paises$infectados.estimados < 5)   # juntar todas las frecuencias de un país pequeño y la justamos todas ellas.
+tabla.infectados.paises2 = tabla.infectados.paises[-paises.con.problemas,]
+
+fila.anadir = data.frame("problemas",as.numeric(as.character(sum(tabla.infectados.paises[tabla.infectados.paises$pais %in% paises[paises.con.problemas],]$infectados))),as.numeric(as.character(sum(tabla.infectados.paises[tabla.infectados.paises$pais %in% paises[paises.con.problemas],]
+                            $infectados.estimados))))
+
+names(fila.anadir)=names(tabla.infectados.paises2)
+
+chisq.test(as.numeric(as.character(tabla.infectados.paises$infectados)),p=as.numeric(as.character(
+  tabla.infectados.paises$infectados.estimados)))
+```
+Como el p-valor es muy pequeño, podemos concluir que no se expandió por igual ek virus en todos los paises para el día 7 de mayo del 2020, es decir, __no existe uniformidad en la expansión del virus__. Se puede variar de fecha o realizarlo para todas ellas, pero no merece la pena ya que es lo que pensabamos.
+
+__¿Ocurre lo mismo en España?__
+
+Vamos a verlo con un dataset que viene desde el 27 de febrero hasta el 15 de abril
+```{r}
+df = read.csv("DatosCCAA.csv", sep=";")
+#Luego cargamos el paquete tidyverse y filtramos los datos con la opción pivot_wider:
+
+df.filtrados = df %>% select(fecha,CCAA,total,tipo)
+
+df.filtrados2= df.filtrados %>%
+
+pivot_wider(names_from=CCAA,values_from=total)
+
+#Como sólo nos interesan el número de infectados, hacemos lo siguiente:
+
+tabla.casos = df.filtrados2[df.filtrados2$tipo=="casos",]
+
+tabla.casos
+```
+Vamos a representarlo en un gráfioco para ver la evolución de las diferentes comunidades autónomas:
+
+```{r}
+library(ggplot2)
+x=as.Date(tabla.casos$fecha)
+ggplot(tabla.casos, aes(x)) +     
+  geom_line(aes(y=tabla.casos$Andalucia, colour="Andalucía")) +
+  geom_line(aes(y=tabla.casos$Aragon, colour="Aragón")) +
+  geom_line(aes(y=tabla.casos$Asturias, colour="Asturias")) +
+  geom_line(aes(y=tabla.casos$Baleares, colour="Baleares")) +
+  geom_line(aes(y=tabla.casos$Canarias, colour="Canarias")) +
+  geom_line(aes(y=tabla.casos$"Castilla-La Mancha", colour="Castilla-La Mancha")) +
+  geom_line(aes(y=tabla.casos$`Castilla y Leon`, colour="Castilla y León")) +
+  geom_line(aes(y=tabla.casos$Cataluna, colour= "Cataluña")) +
+  geom_line(aes(y=tabla.casos$"C. Valenciana", colour= "C. Valenciana")) +
+  geom_line(aes(y=tabla.casos$Extremadura, colour= "Extremadura")) +
+  geom_line(aes(y=tabla.casos$Galicia, colour= "Galicia")) +
+  geom_line(aes(y=tabla.casos$Madrid, colour= "Madrid")) +
+  geom_line(aes(y=tabla.casos$Murcia, colour= "Murcia")) +
+  geom_line(aes(y=tabla.casos$Navarra, colour= "Navarra")) +
+  geom_line(aes(y=tabla.casos$`Pais Vasco`, colour= "País Vasco")) +
+  xlab("Fecha") + ylab("Frecuencias") +
+  ggtitle("número de infectados por comunidad autonoma desde el 27 febrero ")
+  
+
+```
+A simple vista de colores, el virus no ha tenido mismo comportamiento de evolución en las diferentes comunidades autónomas. Las principales afectadas son la comunidad de Madrid y la de Cataluña.
+
+```{r}
+#Primero fijamos la fecha:
+
+fecha="06/04/2020"
+
+#Las frecuencias empíricas son:
+
+frecuencias.empiricas=tabla.casos[tabla.casos$fecha==fecha & tabla.casos$tipo=="casos",]
+
+#Quitamos los dos primeros resultados ya que no son numéricos
+
+frecuencias.empiricas=frecuencias.empiricas[c(-1,-2)]
+
+#Para calcular las frecuencias teóricas, necesitamos la población de cada CCAA. Primero leemos el fichero Fichero_poblaciónCCAA.csv:
+
+fichero.poblaciones = read.csv("Fichero_poblaciónCCAA.csv", sep=";")
+
+#Las poblaciones de cada CCAA serán:
+
+poblaciones = fichero.poblaciones$Pob_CCAA_2019
+
+#A continuación calculamos la población total española y los infectados totales:
+
+poblacion.total=sum(poblaciones)
+
+infectados.totales = sum(frecuencias.empiricas)
+
+#Las frecuencias teóricas o esperadas serán:
+
+frecuencias.teoricas <- poblaciones*(infectados.totales/poblacion.total)
+```
+
+El test de chi cuadrado para las comunidades españolas sera:
+```{r}
+chisq.test(frecuencias.empiricas,p=frecuencias.teoricas/sum(frecuencias.teoricas))
+
+```
+Observamos que el p-valor es muy pequeño.
+
+Por tanto, concluimos que el virus no se expandió por igual en todas las comunidades autónomas el día 6 de abril de 2020.
+
+## Modelo SIR
+
+Vamos a analizar e implementar el modelo SIR para analizar la pandemia del covid-19. Este modelo se llama así porque S proviene de __(Susceptible, Infectious, or Recovered)__. Con esa notación, denominaremos S al numero de succeptibles de contraer enfermedad, I al número de infectados, y R al número de recuperados. Junto a estas variables, este modelo define dos parámetros: __beta__ (el número medio de contactosd por unidad de tiempo) y __gamma__ (el número de recuperados por unidad de tiempo dividido por el total de infectados).
+
+El número de contactos por unidad de tiempo por la probabilidad de ser infectados será: beta*I(t)/N
+La tasa de transicion entre los infectados y los recuperados será gamma
+
+Podeis consultar wikipedia para más información: __https://en.wikipedia.org/wiki/Compartmental_models_in_epidemiology__
+
+Las ecuaciones diferenciales del modelo son: 
+![Caption for the picture.]('M:/Desktop/big_data/Master_D/SIR_model.png')
+Es un sistema diferencial no lineal por Beta I/N. Sin embargo, la suma S+I+R es constante.
+
+Vamos a nalizar el modelo SIR en España. Para ello, volvemos a escoger pop_data escogido en el test de chi cuadrado y la libreria wbstats,
+
+```{r}
+# creación tabla de datos para españa.
+pop_data <- wb(indicator = "SP.POP.TOTL", startdate = 2018, enddate = 2019)
+covid19=read.csv("covid_19_clean_complete.csv")
+covid19.Espana = covid19[covid19$Country.Region =="Spain",]
+
+infectados.por.dia = aggregate(covid19.Espana$Confirmed ~ covid19.Espana$Date, FUN=sum)
+fallecidos.por.dia = aggregate(covid19.Espana$Deaths ~ covid19.Espana$Date, FUN=sum)
+infectados.por.dia2 = infectados.por.dia[,2]+fallecidos.por.dia[,2]
+recuperados.por.dia = aggregate(covid19.Espana$Recovered ~ covid19.Espana$Date, FUN=sum)
+
+# los suceptibles son N-I(t)-R(t)
+habitantes=pop_data$value[pop_data$country =="Spain"]
+susceptibles.por.dia = habitantes - infectados.por.dia2-recuperados.por.dia[,2]
+# Creación de la tabla con toda la información
+tabla.Espana = data.frame(unique(covid19.Espana$Date), susceptibles.por.dia,infectados.por.dia2, recuperados.por.dia[,2])
+names(tabla.Espana)=c("fecha","Supcestible","Infectados", "recuperados")
+head(tabla.Espana, 10)
+```
+En los primeros días no se había expandido la pandemia. Por eso son cero los datos. Ahora calculamos la pendiente de la recta (N ln(S(t))) como función de una bvariable X
+```{r}
+x=tabla.Espana$recuperados
+y=habitantes*log(tabla.Espana$Supcestible)
+summary(lm(y ~ x))
+```
+
+El valor de R(0) sería la ordenada en el origen: 
+```{r}
+(estimacion.Ro=-summary(lm(y ~ x))$coefficients[2])
+```
+Refgresión es buena porque tiene un coeficiente de 0.9652. Para comparar si la epidemia se expandirá o no, tenemos que comparar el valor anterior con exp(Ro R(t)/N)
+
+
+```{r}
+dia.ultimo = length(tabla.Espana[,1])
+exp(estimacion.Ro*tabla.Espana$recuperados[dia.ultimo]/habitantes)
+```
+Como r0 supera con creces el de la exponencial, indica que el corona virus se expandira en España. 
+
+Si hacemos lo mismo con otro país, por ejemplo Australia. Podemos visualizar que tiene menor crecimientos la pandemia, auqnue tambíén se expandirá por el país.
+
+```{r}
+covid19.Australia = covid19[covid19$Country.Region =="Australia",]
+
+infectados.por.dia = aggregate(covid19.Australia$Confirmed ~ covid19.Australia$Date, FUN=sum)
+fallecidos.por.dia = aggregate(covid19.Australia$Deaths ~ covid19.Australia$Date, FUN=sum)
+infectados.por.dia2 = infectados.por.dia[,2]+fallecidos.por.dia[,2]
+recuperados.por.dia = aggregate(covid19.Australia$Recovered ~ covid19.Australia$Date, FUN=sum)
+
+# los suceptibles son N-I(t)-R(t)
+habitantes=pop_data$value[pop_data$country =="Australia"]
+susceptibles.por.dia = habitantes - infectados.por.dia2-recuperados.por.dia[,2]
+# Creación de la tabla con toda la información
+tabla.Australia = data.frame(unique(covid19.Espana$Date), susceptibles.por.dia,infectados.por.dia2, recuperados.por.dia[,2])
+names(tabla.Australia)=c("fecha","Supcestible","Infectados", "recuperados")
+head(tabla.Australia, 10)
+x=tabla.Australia$recuperados
+y=habitantes*log(tabla.Australia$Supcestible)
+summary(lm(y ~ x))
+(estimacion.Ro=-summary(lm(y ~ x))$coefficients[2])
+```
+```{r}
+dia.ultimo = length(tabla.Australia[,1])
+exp(estimacion.Ro*tabla.Australia$recuperados[dia.ultimo]/habitantes)
+```
+Para terminar este punto del modelo SIR, vamos a aanalizar para la provincia de Sevilla. He elegido Andalucia porque es mi provincia.
+```{r}
+datos = read.csv("DatosCCAA.csv", sep=";")
+library(tidyverse)
+
+datos.filtrados=datos%>%select(fecha,CCAA,total,tipo)
+```
+
+```{r}
+casos.Andalucia  = datos %>%
+
+  filter(tipo=="casos") %>%
+
+  filter(CCAA == "Andalucia") %>%
+
+  select(fecha,total)
+
+fallecidos.Andalucia = datos.filtrados %>%
+
+  filter(tipo=="fallecidos") %>%
+
+  filter(CCAA == "Andalucia") %>%
+
+  select(fecha,total)
+
+recuperados.Andalucia = datos.filtrados %>%
+
+  filter(tipo =="altas") %>%
+
+  filter(CCAA == "Andalucia") %>%
+
+  select(fecha,total)
+
+casos.Andalucia2 = casos.Andalucia$total
+
+fallecidos.Andalucia2=c(rep(0,length(casos.Andalucia$total)-length(fallecidos.Andalucia$total)),fallecidos.Andalucia$total)
+
+recuperados.Andalucia2= c(rep(0, length(casos.Andalucia$total)-length(recuperados.Andalucia$total)),recuperados.Andalucia$total)
+```
+
+Ahora hallaremos la estimación del número básico de reproducción R0 y compararlo con el valor adecuado para estudiar si la epidemia se seguirá expandiendo o no en Andalucia. Para ello, cargamos un nuevo datasets.
+```{r}
+fichero.poblaciones = read.csv("Fichero_poblaciónCCAA.csv", sep=";")
+
+poblacion.Andalucia=fichero.poblaciones[fichero.poblaciones$CCAA=="ANDALUCIA",]$Pob_CCAA_2019
+
+susceptibles.Andalucia = poblacion.Andalucia-casos.Andalucia2-fallecidos.Andalucia2
+
+#Para hallar la estimación de R0 hacemos lo siguiente:
+
+x=recuperados.Andalucia2
+
+y=poblacion.Andalucia*log(susceptibles.Andalucia)
+
+(estimacion.R0 = -summary(lm(y~x))$coefficients[2])
+
+```
+
+```{r}
+#y tenemos que comparar con:
+
+dia.ultimo = length(casos.Andalucia2)
+
+exp(estimacion.R0*recuperados.Andalucia2[dia.ultimo]/poblacion.Andalucia)
+```
+Como Ro es menor que el valor anterior, indica que la pandemia no irá creciendo
+
+# MODELAR DATOS MEDIANTE SERIE TEMPORAL
+
+Una serie temporal es una serie de observaciones ordenadas en e ltiempo. Son usadas para ver el fenomeno o una variable a lo largo del tiempo. En el COVID puede ser el número de infectados o recuperados. Para ello, la serie puede realizar predicciones del fenómeno en x días. Podemos usarlo como proceso estocastico donde las variables estan relacionadas. Es decir, los datos que tengo hoy influyen en lo que pueda pasar en unos dias.
+
+4 componentes fundamentales: la __tendencia__ (informa sobre la evolución serie), la __estacionalidad__ (patrón que se repite), la __ciclica__ (variaciones a largo plazos, para este problemas podemos devir que tienden a cero) y __aletoreidad__ (debidos al azar).
+
+Para modelar una serie temporal podemos usar dos módelos: 
+__modelo aditivo__: Y(t) = T(t) + E(t) + C(t) + R(t)  donde la componente estacional mantiene su amplitud
+__modelo multiplicativco__: Y(t) = (T(t) x E(t) x C(t)) + R(t) donde la amplitud va amplificando con el tiempo
+
+Podemos tener la serie temporal ajustada si eliminamos la compoinente estacional de los datos. Esto es importante para los modelos de prección para basarse en modelos sin componente estacional.
+
+__modelo aditivo__: Y(t) = Y(t) - E(t) 
+__modelo multiplicativco__: Y(t) = Y(t) / E(t)  donde la amplitud va amplificando con el tiempo
+
+Para este ejemplo del covid-19 usaremos el __modelo suavizado exponencial de Holt-Winters__. Este presupone que va a incrementar la serie. Usaremos no estacionalidad. El modelo suavizado crea dos tendencias de serie. S(t) será una serie suavizada y B(t) la estimación de la serie, es decir: 
+para t=1  -->     S(1) = Y(1) , B(1) = Y(1) - Y(0)
+y para t > 1 -->  S(t) = alfa*S(t)+ (1-alfa)(Y(t-1)+B(t-1))
+                  B(t) = beta(S(t)-S(t-1)) + (1 - beta)B(t-1)
+donde alfa y beta son dos parámetros a estimar. __Alfa__ es el peso que se le asigna al aserie suavizadarespecto de la serie original en el tiempo actual. Beta es el peso de la tendencia de la serie respecto de la pendiente de la serie suavizada.
+
+Para un valor t+m, la predicción seria S(t)+m B(t)
+Por otra parte, podemos calcular niveles de confianza para el valor predicho. Para ver que funciona, podemos ver que las correlaciones de las componentes residuales son ceros y que los valores de las componentes residuales de la serei predicha sigue una distribución normal. Para ello, podemos usar el __correlograma__ que es que es un gráfico que indica si las correlaciones son significativas o no.Para ello, devemos calculan las medias de la serei temporal y las covarianzas, para posteriormente, calcular la autocorrelación. Otra forma de comprobar el modelo es mediante el test de Ljung-Box (si p-valor es grande, las autocorrelaciones no son significativas)
+
+
+Vamos a analizarnuestro dataset inicial (covid_19_clean_complete.csv). Para ello, codemos la tabla covid19.Espana y infectados.por.dia; fallecidos.por.dia; infectados.por.dia2; recuperados.por.dia. Volvemos a ejecutarlo desde cero para garantizar que no cargamos nada de Australia o Andalucia.
+```{r}
+covid19=read.csv("covid_19_clean_complete.csv")
+covid19.Espana = covid19[covid19$Country.Region =="Spain",]
+
+infectados.por.dia = aggregate(covid19.Espana$Confirmed ~ covid19.Espana$Date, FUN=sum)
+fallecidos.por.dia = aggregate(covid19.Espana$Deaths ~ covid19.Espana$Date, FUN=sum)
+recuperados.por.dia = aggregate(covid19.Espana$Recovered ~ covid19.Espana$Date, FUN=sum)
+tabla.Espana = data.frame(infectados.por.dia[,1],infectados.por.dia[,2],
+                           fallecidos.por.dia[,2],recuperados.por.dia[,2])
+names(tabla.Espana)=c("Fecha", "Infectados", "Fallecidos", "Recuperados")
+```
+
+Vamos a modelar el número de infectados como serie temporal. frequency 7 indica que nuestra estacionalidad es por semanas.start=c(1,22) significa que el primer dato es para el la semana 1 dia 3 (22 de enero) y acaba el día 5 de la semana 17 ()
+```{r}
+serie.temporal.infectados = ts(tabla.Espana$Infectados,frequency = 7,start=c(1,3))
+serie.temporal.infectados
+```
+
+```{r}
+library(forecast)   #install.packages("forecast")
+autoplot(serie.temporal.infectados)
+plot.ts(serie.temporal.infectados)
+```
+
+Suponemos que la serie es aditiva,
+
+```{r}
+library(TTR) #install.packages("TTR")
+componente.trend = SMA(serie.temporal.infectados,n=7) # moving averages of n=7
+components = decompose(serie.temporal.infectados)
+components$seasonal
+```
+Cada siete dias hay un comportamiento estacional. Desde punto vista acentual, los martes hay una diosminución de los infectados (valor negativo) mientras que jueves, viernes, sabado y domingo más acentuada. Podemos pintarla para ver esas diferentes componentes de la serie. En primer lugar se ve datos originales. El segundo es la componente estacional. La tercera es la tendencia de la serie. La cuarta es la componente aleatoria. Esta ultima lo ideal es que no sea muy alta.
+
+```{r}
+# Suposing Seasonal Data
+plot(components)
+```
+Observamos que: 
+- La tendencia de la serie es creciente.
+- Los días de más repunte son jueves, viernes, y sabados.
+- Domingos y lunes los de menos repunten.
+- La componente aleatoria se mantiene estable hasta la semana 8 y 9, donde después se desestabiliza.
+
+Para ello, hallamos serie ajustada (es la resta de nuestra serie con la componente estacional). El aspecto será similar a la original.
+```{r}
+serie.temporal.infectados.adjusted = serie.temporal.infectados-components$seasonal
+plot.ts(serie.temporal.infectados.adjusted)
+```
+Y usando el __suaviuzado de Holt_winters__. 
+```{r}
+# Forecasts
+# Simple Exponential Smoothing
+forecast.infectados = HoltWinters(serie.temporal.infectados.adjusted,gamma=FALSE)   #gamma es false por ser doble suavizado.
+forecast.infectados$fitted
+plot(forecast.infectados)
+
+```
+Cuando hay una tendencia en la serie temporal no funciona bien el suiavizado exponencial, por eso usamois el suavizado exponencial doble. En el gráfico anterior . la roja es la serie predicha y la negra la original. QUe se muestra que tienen ciertas simulitudes.  
+
+El error cometido se calcula con la SSE. Nos equivocamos en un valor sqrt(forecast.infectados$SSE). El error es demasiado grande en este caso. 
+
+```{r}
+forecast.infectados$SSE
+sqrt(forecast.infectados$SSE)
+```
+Sin embargo, lo interesante del forecast es predecir datos futuros.Usaremos la función forecast.holtwinters de la libreria forecast para calcular este propóstico. El parámetro h indica hasta donde queremos realizar la predicción. Vamos a poner una semana.
+
+```{r}
+# further time point
+forecast.infectados2 = forecast:::forecast.HoltWinters(forecast.infectados,h=7)
+# forecast.infectados2 tiene 6 columnas. La primera son los días que hacemos la predicción. La segunda es la predicción. La 3 y 4 son los esxtremos del intervalo de # confianza de 80%. La quinta y la sexta son los extremos de la serie con un intervalo de confianza del 95% 
+forecast:::plot.forecast(forecast.infectados2)
+```
+Para comprobar el modelo calñculado para la serie temporal, usamos el __test de Ljung-Box__ para ver las aotocorrelaciones de los residuos. Para que el mopdelo sea válido, deben ser ceros. Vamos a realizar un gráfico del coreograma.En el punto seis tenemos problemas. Parece que las correlaciones para 6 días se pueden considerar diferentes de cero.
+
+```{r}
+acf(forecast.infectados2$residuals[3:75],lag.max=7)
+```
+Hagamos el __test de Ljung-Box__
+```{r}
+Box.test(forecast.infectados2$residuals,lag=7,type="Ljung-Box") # no evidence of non-zero autocorrelation
+```
+Si esta entrte 0.05 y 0.1 no podemos decir nada ya que es la zona de penumbra y no se suele pronunciar uno. En nuestro caso, es superior a 0.1
+
+Un __test de Shapiro-Wilks__ para ver la normalidad:
+
+```{r}
+plot.ts(forecast.infectados2$residuals)
+shapiro.test(forecast.infectados2$residuals)
+```
+No lo sigue porque el p-valor es muy pequeño.- Por eso, el modelo no es adecuado.
+__¿Y para los fallecidos?__ Vamos a verlo
+
+```{r}
+serie.temporal.fallecidos = ts(tabla.Espana$Fallecidos,frequency = 7,start=c(1,3))
+serie.temporal.fallecidos
+plot.ts(serie.temporal.fallecidos)
+
+# Decomposing Time Series
+
+# Suposing Non-Seasonal Data
+# Trend component suposing addicional model
+componente.trend = SMA(serie.temporal.fallecidos,n=7) # moving averages of n=7
+plot.ts(componente.trend)
+
+# Suposing Seasonal Data
+
+components = decompose(serie.temporal.fallecidos)
+components$seasonal
+plot(components)
+```
+```{r}
+serie.temporal.fallecidos.adjusted = serie.temporal.fallecidos-components$seasonal
+plot.ts(serie.temporal.infectados.adjusted)
+
+# Forecasts
+# Simple Exponential Smoothing
+(forecast.fallecidos = HoltWinters(serie.temporal.fallecidos.adjusted,gamma=FALSE))
+forecast.fallecidos$fitted
+plot(forecast.fallecidos)
+forecast.fallecidos$SSE
+
+# further time point
+library(forecast)
+forecast.fallecidos2 = forecast:::forecast.HoltWinters(forecast.fallecidos,h=7)
+forecast:::plot.forecast(forecast.fallecidos2)
+acf(forecast.fallecidos2$residuals[3:75],lag.max=7)
+```
+```{r}
+acf(forecast.fallecidos2$residuals[3:75],lag.max=7)
+
+```
+```{r}
+Box.test(forecast.fallecidos2$residuals,lag=7,type="Ljung-Box") # no evidence of non-zero autocorrelation
+
+```
+El p-valor es muy pequeños (p < 0.05), por lo que se puede rechazar la hipótesis nula. 
+```{r}
+plot.ts(forecast.fallecidos2$residuals)
+shapiro.test(forecast.fallecidos2$residuals)
+```
+el test de normalidad sigue siendo pequeño, por lo que no es adecuado el modelo.
+
+## CONCLUSIONES
+
+Mediante este Markdown, hemos realizado análisis de datos del covid 19 junto con algunos modelos sencillos (exponencial, lineal, etc) o algo más ccomplejos (modelo SIR). A su vez, hemos análizado el problema mediante series temporales y analizar el modelo si es válido o no.
+
+Hemos visto que el virus no se ha propagado igual por todo el mundo. También, hemos particularizado para las comunidades autonomas de España. En ellas, se observa que Madrid y Cataluña son las más perjudicadas.
+
+El datasets parece que tiene ciertos errores, o eso nos parece a aquellos que lo hemos análizado. La razón es que China y Alemania tienen pocos datos. Eso indica que han contenido el virus perfectamente, o bien, que no han registrado todos los datos. 
+
+Se puede crear un cuadro de mando con shiny para visualizar todo esto junto. Si me da tiempo, lo subiré al mismo github.
+
+También, se puede realizar algo parecido en la competición:
+
+https://www.kaggle.com/c/covid19-global-forecasting-week-5?utm_medium=email&utm_source=intercom&utm_campaign=covid19-global-wk5
+
+No pude apuntarme a la competición por falta de tiempo.
